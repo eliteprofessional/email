@@ -1,0 +1,20 @@
+{
+  "name": "airepro-mail",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test-batch.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^18.0.2",
+    "express": "^5.2.1",
+    "nodemailer": "^10.0.10"
+  }
+}

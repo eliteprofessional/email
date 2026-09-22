@@ -1,0 +1,10 @@
+services:
+  postfix:
+    image: boky/postfix:latest
+    container_name: airepro-postfix
+    restart: unless-stopped
+    environment:
+      HOSTNAME: mail.airepro.in
+      ALLOWED_SENDER_DOMAINS: airepro.in
+    ports:
+      - "2525:25"
