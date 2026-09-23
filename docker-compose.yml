@@ -4,7 +4,11 @@ services:
     container_name: airepro-postfix
     restart: unless-stopped
     environment:
-      HOSTNAME: mail.airepro.in
-      ALLOWED_SENDER_DOMAINS: airepro.in
+      HOSTNAME: mail.airepro.solutions
+      ALLOWED_SENDER_DOMAINS: airepro.solutions
+      # Keys persist in ./dkim — keep this true only when keys are missing
+      DKIM_AUTOGENERATE: "true"
     ports:
       - "2525:25"
+    volumes:
+      - ./dkim:/etc/opendkim/keys

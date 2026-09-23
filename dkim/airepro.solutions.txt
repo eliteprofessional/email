@@ -1,0 +1,3 @@
+mail._domainkey	IN	TXT	( "v=DKIM1; h=sha256; k=rsa; s=email; "
+	  "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwkxIj6Vt5CXEvwRVNyxHeMCpRgetO8+KXoQCewVGSZEfrFclco0w6ZZFyXzniTzPhCyr5JltAEngFTJr2Xr6rO2YNJqbYeXGcva8nK371Hg2bZ7QH/olEB6OPmFMUMc8RK+iGTLbUDrmwzzamqewLdxuvzNqhcl7OzuY3+FSCfiyc3O66Tz6F6i7ukqLqB9RPLtIpjM/0iKf4B"
+	  "DidqDFAmvv8UgsXQpoPVyQpTBBr2QRH8BqJuNAUVC8HDmcvRUEXL8r3AfLeDSfn5zF7eURP9md+2xaa0n+8CS5aRQBV724XFubjZ0EBWv5cNTEgsm6NbB0S/BPiBGlqf7akcNbcQIDAQAB" )  ; ----- DKIM key mail for airepro.solutions

@@ -36,3 +36,9 @@ Thumbs.db
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Secrets / local env
+.env
+
+# DKIM private keys (public .txt can be committed if needed)
+dkim/*.private
