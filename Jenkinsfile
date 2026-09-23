@@ -210,6 +210,26 @@ pipeline {
             def remoteCmd = '''
               set -euo pipefail
               trap 'rm -f "$0"' EXIT
+
+              # boky/postfix ships its own HEALTHCHECK; wait for it (or plain "running"
+              # if the image build has none) instead of checking immediately after
+              # `docker compose up`, which races Postfix's own startup/DKIM load.
+              ready=""
+              for i in $(seq 1 30); do
+                status="$(docker inspect -f '{{.State.Status}}' airepro-postfix 2>/dev/null || echo missing)"
+                health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' airepro-postfix 2>/dev/null || echo missing)"
+                if [ "$status" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "none" ]; }; then
+                  ready="1"
+                  break
+                fi
+                sleep 2
+              done
+              if [ -z "$ready" ]; then
+                echo "ERROR: airepro-postfix did not become ready in time (status=$status health=$health)"
+                docker logs airepro-postfix --tail 40 || true
+                exit 1
+              fi
+
               docker inspect -f '{{.State.Status}}' airepro-postfix | grep -q running
               docker exec airepro-postfix postconf myhostname | grep -q mail.airepro.solutions
               (ss -lnt 2>/dev/null || netstat -lnt) | grep -q ':2525 '
