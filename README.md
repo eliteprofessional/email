@@ -20,20 +20,20 @@ Replace this everywhere it appears when the server IP changes:
 
 All mail records must be **DNS only** (grey cloud). Do **not** orange-cloud or put `mail` behind an HTTP Cloudflare Tunnel.
 
-| Type | Name | Content | Proxy | Notes |
-|------|------|---------|-------|--------|
-| **A** | `mail` | `122.180.85.70` | DNS only | Hostname for Postfix |
-| **MX** | `@` | `mail.airepro.solutions` | — | Priority **10** |
-| **TXT** | `@` | `v=spf1 ip4:122.180.85.70 -all` | — | Must match the A record IP |
-| **TXT** | `_dmarc` | `v=DMARC1; p=none; rua=mailto:campaigns@airepro.solutions` | — | Tighten `p=` later if desired |
-| **TXT** | `mail._domainkey` | `v=DKIM1; h=sha256; k=rsa; s=email; p=…` | — | Public key from Postfix (see below) |
+| Type    | Name              | Content                                                    | Proxy    | Notes                               |
+| ------- | ----------------- | ---------------------------------------------------------- | -------- | ----------------------------------- |
+| **A**   | `mail`            | `122.180.85.70`                                            | DNS only | Hostname for Postfix                |
+| **MX**  | `@`               | `mail.airepro.solutions`                                   | —        | Priority **10**                     |
+| **TXT** | `@`               | `v=spf1 ip4:122.180.85.70 -all`                            | —        | Must match the A record IP          |
+| **TXT** | `_dmarc`          | `v=DMARC1; p=none; rua=mailto:campaigns@airepro.solutions` | —        | Tighten `p=` later if desired       |
+| **TXT** | `mail._domainkey` | `v=DKIM1; h=sha256; k=rsa; s=email; p=…`                   | —        | Public key from Postfix (see below) |
 
 ### When the IP changes
 
-1. Edit **A** `mail` → new IP  
-2. Edit **TXT** SPF `@` → `v=spf1 ip4:NEW_IP -all`  
-3. Ask the VPS provider to set **PTR**: `NEW_IP` → `mail.airepro.solutions`  
-4. Update app env `AIREPRO_SMTP_HOST` if the API is not on the same machine (see below)  
+1. Edit **A** `mail` → new IP
+2. Edit **TXT** SPF `@` → `v=spf1 ip4:NEW_IP -all`
+3. Ask the VPS provider to set **PTR**: `NEW_IP` → `mail.airepro.solutions`
+4. Update app env `AIREPRO_SMTP_HOST` if the API is not on the same machine (see below)
 5. Do **not** change DKIM unless you regenerate keys on the server
 
 ### DKIM (`mail._domainkey`)
@@ -55,18 +55,18 @@ v=DKIM1; h=sha256; k=rsa; s=email; p=MIIBIjANBg...IDAQAB
 
 ### What not to do in Cloudflare
 
-- Do **not** create an HTTP Tunnel route `mail.airepro.solutions` → `localhost:2525` (SMTP is not HTTP)  
-- Do **not** proxy `mail` (orange cloud)  
+- Do **not** create an HTTP Tunnel route `mail.airepro.solutions` → `localhost:2525` (SMTP is not HTTP)
+- Do **not** proxy `mail` (orange cloud)
 - Website `@` / `www` A/CNAME records are optional for send-only mail; ignore “visitors cannot reach” if you are not hosting a site
 
 ---
 
 ## Outside Cloudflare (required for inbox delivery)
 
-| Item | Where | Value |
-|------|--------|--------|
-| **PTR / rDNS** | VPS / IP provider panel | `122.180.85.70` → `mail.airepro.solutions` |
-| Firewall | VPS | Outbound **TCP 25** (delivery); inbound **2525** only if a remote app submits mail |
+| Item           | Where                   | Value                                                                              |
+| -------------- | ----------------------- | ---------------------------------------------------------------------------------- |
+| **PTR / rDNS** | VPS / IP provider panel | `122.180.85.70` → `mail.airepro.solutions`                                         |
+| Firewall       | VPS                     | Outbound **TCP 25** (delivery); inbound **2525** only if a remote app submits mail |
 
 ---
 
@@ -222,26 +222,43 @@ SPF string must contain the **same** IP as the `mail` A record. PTR must match `
 
 ## Jenkins deploy
 
-[`Jenkinsfile`](Jenkinsfile) assumes **Jenkins runs on the same VPS** as Postfix (no SSH).
+[`Jenkinsfile`](Jenkinsfile) assumes **Jenkins runs on a different machine** than the mail host and deploys to the target VPS over **SSH**.
 
-It copies the repo into `/opt/email` (configurable), installs the DKIM private key from Jenkins credentials if present, then runs `docker compose up -d`.
+It rsyncs (or scp/tar-falls back to) the repo into `/opt/email` on the target (configurable), installs the DKIM private key from Jenkins credentials if present, then runs `docker compose up -d` and a smoke check — all via SSH.
 
-### Why no `vps-ssh-key`?
+### Target VPS
 
-SSH is only needed when Jenkins is on a **different** machine from the mail host. On one VPS, the job just uses local Docker.
+```bash
+ssh airepro2@122.180.85.70
+```
 
-### Jenkins credentials
+### SSH auth mode
 
-| Credential ID (default) | Type | Purpose |
-|-------------------------|------|---------|
-| `airepro-dkim-private` | Secret file | `dkim/airepro.solutions.private` (gitignored) |
+The `SSH_AUTH_MODE` parameter picks how Jenkins authenticates — **`password`** (current default) or **`key`**. Switching back to the key later is just re-running the job with `SSH_AUTH_MODE=key`; nothing else needs to change.
+
+> **Security note:** password auth to a VPS with SSH open to the internet is meaningfully weaker than key auth — it's brute-forceable. Prefer a strong password (not something like `146...`), and/or restrict inbound `22/tcp` in `ufw` to known source IPs. Switch back to `key` mode once convenient.
+
+| Credential ID (default) | Type                          | Purpose                                                                                       | Used when                                                      |
+| ----------------------- | ----------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `airepro2-vps-password` | Secret text                   | The `airepro2` SSH password                                                                   | `SSH_AUTH_MODE=password`                                       |
+| `airepro2-vps-ssh`      | SSH Username with private key | Deploys to `airepro2@122.180.85.70` (username `airepro2`, private key authorized on that VPS) | `SSH_AUTH_MODE=key`                                            |
+| `airepro-dkim-private`  | Secret file                   | `dkim/airepro.solutions.private` (gitignored)                                                 | always (optional — falls back to a file already on the target) |
+
+The **Credentials Binding** plugin must be installed (provides the `string`/`file` bindings); the **SSH Credentials** plugin is only needed for `key` mode (`sshUserPrivateKey`).
+
+**Agent-side tools required:**
+
+- `password` mode: `sshpass` on a Unix agent, or PuTTY's `plink.exe`/`pscp.exe` (on `PATH`) on a Windows agent.
+- `key` mode: a plain `ssh`/`scp` client (OpenSSH) on either OS.
 
 ### Pipeline job
 
-1. Pipeline from SCM → this repo, script path `Jenkinsfile`  
-2. Agent OS auto-detected (`sh` / `powershell`)  
-3. Ensure Docker is installed on the VPS and the Jenkins user can run `docker`  
-4. First build: upload `airepro-dkim-private`, or pre-create `/opt/email/dkim/airepro.solutions.private`
+1. Pipeline from SCM → this repo, script path `Jenkinsfile`
+2. Add credential `airepro2-vps-password` (kind: **Secret text**, value = the `airepro2` password)
+3. Agent OS auto-detected (`sh` / `powershell`) — the agent just needs the SSH tooling above, not Docker
+4. Ensure Docker is installed on the **target VPS** and the `airepro2` user can run `docker` (add to the `docker` group)
+5. First build: upload `airepro-dkim-private`, or pre-create `/opt/email/dkim/airepro.solutions.private` on the target
 
-Parameter `DEPLOY_PATH` default: `/opt/email`.
+Parameters: `DEPLOY_HOST` default `airepro2@122.180.85.70`, `SSH_AUTH_MODE` default `password`, `SSH_PASSWORD_CREDENTIAL_ID` default `airepro2-vps-password`, `SSH_CREDENTIAL_ID` default `airepro2-vps-ssh`, `DEPLOY_PATH` default `/opt/email`.
 
+SMTP is exposed on the target VPS as **host port 2525** (mapped to the container's port 25). Open inbound `2525/tcp` only if something outside the VPS submits mail directly to this port.
