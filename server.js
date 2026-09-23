@@ -2,9 +2,21 @@ require("dotenv").config();
 const express = require("express");
 const { transporter, verifyConnection, SMTP_CONFIG } = require("./src/config/mailer");
 const mailRoutes = require("./src/routes/mailRoutes");
+const auditRoutes = require("./src/routes/auditRoutes");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// CORS Middleware
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    if (req.method === "OPTIONS") {
+        return res.sendStatus(200);
+    }
+    next();
+});
 
 // Middleware: allow large JSON payloads (up to 50MB) to easily accept 10k+ recipient batches
 app.use(express.json({ limit: "50mb" }));
@@ -45,8 +57,10 @@ app.get("/health", async (req, res) => {
     });
 });
 
-// Mount Mail API Routes
+// Mount Mail and Config Audit API Routes
 app.use("/api/mail", mailRoutes);
+app.use("/api/config", auditRoutes);
+
 
 // 404 Handler
 app.use((req, res) => {
@@ -72,6 +86,17 @@ const server = app.listen(PORT, async () => {
     // Verify SMTP connection on startup
     await verifyConnection();
 });
+
+server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+        console.error(`\n❌ [PORT CONFLICT] Port ${PORT} is already in use by another process (e.g. docker container)!`);
+        console.error(`👉 Change PORT in .env (for example: PORT=3001) or free up port ${PORT}.\n`);
+    } else {
+        console.error("[Server Listen Error]", err);
+    }
+    process.exit(1);
+});
+
 
 // Graceful Shutdown
 function handleShutdown(signal) {
