@@ -31,12 +31,12 @@ pipeline {
     string(
       name: 'DKIM_PRIVATE_CREDENTIAL_ID',
       defaultValue: 'airepro-dkim-private',
-      description: 'Optional Jenkins Secret file credential for dkim/airepro.solutions.private (needed on first deploy)'
+      description: 'Optional Jenkins Secret file for dkim/airepro.solutions.private (first deploy)'
     )
     booleanParam(
       name: 'FORCE_RECREATE',
       defaultValue: false,
-      description: 'Run docker compose up -d --force-recreate'
+      description: 'Run docker compose up -d --force-recreate on the VPS'
     )
   }
 
@@ -53,11 +53,19 @@ pipeline {
 
     stage('Validate compose') {
       steps {
-        sh '''
-          set -e
-          test -f docker-compose.yml
-          docker compose -f docker-compose.yml config >/dev/null
-          echo "docker-compose.yml OK"
+        powershell '''
+          if (-not (Test-Path 'docker-compose.yml')) {
+            throw 'docker-compose.yml not found'
+          }
+          Write-Host 'docker-compose.yml present'
+          # Prefer validating on the Linux VPS; local Windows agent may not have docker compose
+          if (Get-Command docker -ErrorAction SilentlyContinue) {
+            docker compose -f docker-compose.yml config | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'docker compose config failed' }
+            Write-Host 'docker compose config OK'
+          } else {
+            Write-Host 'docker not on agent — skipping local compose config (will validate on VPS)'
+          }
         '''
       }
     }
@@ -71,33 +79,74 @@ pipeline {
             usernameVariable: 'SSH_USER_FROM_CRED'
           )
         ]) {
-          sh '''
-            set -euo pipefail
+          powershell '''
+            $ErrorActionPreference = 'Stop'
+            $deployUser = if ($env:DEPLOY_USER) { $env:DEPLOY_USER } else { $env:SSH_USER_FROM_CRED }
+            $hostName = $env:DEPLOY_HOST
+            $deployPath = $env:DEPLOY_PATH
+            $remote = "${deployUser}@${hostName}"
+            $key = $env:SSH_KEY
 
-            DEPLOY_USER="${DEPLOY_USER}"
-            # Prefer parameter user; fall back to credential username
-            if [ -z "${DEPLOY_USER}" ]; then
-              DEPLOY_USER="${SSH_USER_FROM_CRED}"
-            fi
+            $sshBase = @(
+              '-i', $key,
+              '-o', 'StrictHostKeyChecking=accept-new',
+              '-o', 'BatchMode=yes'
+            )
 
-            SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-            REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+            Write-Host "Deploying workspace to ${remote}:${deployPath}"
 
-            echo "Deploying to ${REMOTE}:${DEPLOY_PATH}"
+            & ssh @sshBase $remote "mkdir -p '${deployPath}/dkim'"
+            if ($LASTEXITCODE -ne 0) { throw "ssh mkdir failed ($LASTEXITCODE)" }
 
-            ssh ${SSH_OPTS} "${REMOTE}" "mkdir -p '${DEPLOY_PATH}/dkim'"
+            # Stage a clean payload (exclude secrets / junk). Never ship a missing private key overwrite.
+            $stage = Join-Path $env:TEMP ("email-deploy-" + [guid]::NewGuid().ToString())
+            New-Item -ItemType Directory -Path $stage | Out-Null
+            try {
+              $excludeDirs = @('.git', 'node_modules')
+              Get-ChildItem -Force | Where-Object {
+                $_.Name -notin $excludeDirs -and $_.Name -ne '.env'
+              } | ForEach-Object {
+                Copy-Item $_.FullName -Destination (Join-Path $stage $_.Name) -Recurse -Force
+              }
+              # Do not upload private key from workspace (gitignored / absent)
+              $priv = Join-Path $stage 'dkim\\airepro.solutions.private'
+              if (Test-Path $priv) { Remove-Item $priv -Force }
 
-            # Sync repo; never overwrite an existing DKIM private key on the server
-            rsync -az --delete \
-              -e "ssh ${SSH_OPTS}" \
-              --exclude '.git/' \
-              --exclude '.env' \
-              --exclude 'node_modules/' \
-              --exclude 'dkim/*.private' \
-              ./ "${REMOTE}:${DEPLOY_PATH}/"
+              # Tar is available on modern Windows 10+
+              $tar = Join-Path $env:TEMP ("email-deploy-" + [guid]::NewGuid().ToString() + '.tar')
+              Push-Location $stage
+              try {
+                & tar -cf $tar *
+                if ($LASTEXITCODE -ne 0) { throw "tar create failed ($LASTEXITCODE)" }
+              } finally {
+                Pop-Location
+              }
 
-            # Keep compose + public DKIM; private key comes from credential or prior deploy
-            ssh ${SSH_OPTS} "${REMOTE}" "ls -la '${DEPLOY_PATH}' '${DEPLOY_PATH}/dkim' || true"
+              & scp @sshBase $tar "${remote}:/tmp/email-deploy.tar"
+              if ($LASTEXITCODE -ne 0) { throw "scp failed ($LASTEXITCODE)" }
+
+              $remoteScript = @"
+set -euo pipefail
+mkdir -p '${deployPath}'
+# Preserve existing private key if present
+if [ -f '${deployPath}/dkim/airepro.solutions.private' ]; then
+  cp -a '${deployPath}/dkim/airepro.solutions.private' /tmp/airepro.solutions.private.bak
+fi
+tar -xf /tmp/email-deploy.tar -C '${deployPath}'
+mkdir -p '${deployPath}/dkim'
+if [ -f /tmp/airepro.solutions.private.bak ]; then
+  mv /tmp/airepro.solutions.private.bak '${deployPath}/dkim/airepro.solutions.private'
+  chmod 600 '${deployPath}/dkim/airepro.solutions.private' || true
+fi
+rm -f /tmp/email-deploy.tar
+ls -la '${deployPath}' '${deployPath}/dkim' || true
+"@
+              $remoteScript | & ssh @sshBase $remote 'bash -s'
+              if ($LASTEXITCODE -ne 0) { throw "remote extract failed ($LASTEXITCODE)" }
+            } finally {
+              Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+              Remove-Item (Join-Path $env:TEMP 'email-deploy-*.tar') -Force -ErrorAction SilentlyContinue
+            }
           '''
         }
       }
@@ -119,16 +168,19 @@ pipeline {
             variable: 'DKIM_PRIVATE_FILE'
           )
         ]) {
-          sh '''
-            set -euo pipefail
-            DEPLOY_USER="${DEPLOY_USER:-$SSH_USER_FROM_CRED}"
-            SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-            REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
-            DEST="${DEPLOY_PATH}/dkim/airepro.solutions.private"
+          powershell '''
+            $ErrorActionPreference = 'Stop'
+            $deployUser = if ($env:DEPLOY_USER) { $env:DEPLOY_USER } else { $env:SSH_USER_FROM_CRED }
+            $remote = "${deployUser}@$($env:DEPLOY_HOST)"
+            $key = $env:SSH_KEY
+            $dest = "$($env:DEPLOY_PATH)/dkim/airepro.solutions.private"
+            $sshBase = @('-i', $key, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes')
 
-            scp ${SSH_OPTS} "${DKIM_PRIVATE_FILE}" "${REMOTE}:${DEST}"
-            ssh ${SSH_OPTS} "${REMOTE}" "chmod 600 '${DEST}' && chown root:root '${DEST}' || true"
-            echo "DKIM private key installed at ${DEST}"
+            & ssh @sshBase $remote "mkdir -p '$($env:DEPLOY_PATH)/dkim'"
+            & scp @sshBase $env:DKIM_PRIVATE_FILE "${remote}:${dest}"
+            if ($LASTEXITCODE -ne 0) { throw "scp DKIM private key failed ($LASTEXITCODE)" }
+            & ssh @sshBase $remote "chmod 600 '${dest}' || true"
+            Write-Host "DKIM private key installed at ${dest}"
           '''
         }
       }
@@ -143,32 +195,34 @@ pipeline {
             usernameVariable: 'SSH_USER_FROM_CRED'
           )
         ]) {
-          sh '''
-            set -euo pipefail
-            DEPLOY_USER="${DEPLOY_USER:-$SSH_USER_FROM_CRED}"
-            SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-            REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          powershell '''
+            $ErrorActionPreference = 'Stop'
+            $deployUser = if ($env:DEPLOY_USER) { $env:DEPLOY_USER } else { $env:SSH_USER_FROM_CRED }
+            $remote = "${deployUser}@$($env:DEPLOY_HOST)"
+            $key = $env:SSH_KEY
+            $path = $env:DEPLOY_PATH
+            $force = $env:FORCE_RECREATE
+            $sshBase = @('-i', $key, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes')
 
-            UP_FLAGS="-d"
-            if [ "${FORCE_RECREATE}" = "true" ]; then
-              UP_FLAGS="-d --force-recreate"
-            fi
+            $upFlags = '-d'
+            if ($force -eq 'true') { $upFlags = '-d --force-recreate' }
 
-            ssh ${SSH_OPTS} "${REMOTE}" bash -s <<EOF
+            $remoteScript = @"
 set -euo pipefail
-cd '${DEPLOY_PATH}'
-
+cd '${path}'
 if [ ! -f dkim/airepro.solutions.private ]; then
-  echo "ERROR: dkim/airepro.solutions.private missing on server."
-  echo "Add Jenkins secret file credential (DKIM_PRIVATE_CREDENTIAL_ID) or copy the key once manually."
+  echo 'ERROR: dkim/airepro.solutions.private missing on server.'
+  echo 'Set Jenkins secret file credential DKIM_PRIVATE_CREDENTIAL_ID or copy the key once manually.'
   exit 1
 fi
-
+docker compose -f docker-compose.yml config >/dev/null
 docker compose pull
-docker compose up ${UP_FLAGS}
+docker compose up ${upFlags}
 docker compose ps
 docker logs airepro-postfix --tail 40
-EOF
+"@
+            $remoteScript | & ssh @sshBase $remote 'bash -s'
+            if ($LASTEXITCODE -ne 0) { throw "docker compose up failed ($LASTEXITCODE)" }
           '''
         }
       }
@@ -183,20 +237,22 @@ EOF
             usernameVariable: 'SSH_USER_FROM_CRED'
           )
         ]) {
-          sh '''
-            set -euo pipefail
-            DEPLOY_USER="${DEPLOY_USER:-$SSH_USER_FROM_CRED}"
-            SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-            REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          powershell '''
+            $ErrorActionPreference = 'Stop'
+            $deployUser = if ($env:DEPLOY_USER) { $env:DEPLOY_USER } else { $env:SSH_USER_FROM_CRED }
+            $remote = "${deployUser}@$($env:DEPLOY_HOST)"
+            $key = $env:SSH_KEY
+            $sshBase = @('-i', $key, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes')
 
-            ssh ${SSH_OPTS} "${REMOTE}" bash -s <<EOF
+            $remoteScript = @'
 set -euo pipefail
-docker inspect -f '{{.State.Status}}' airepro-postfix | grep -q running
+docker inspect -f "{{.State.Status}}" airepro-postfix | grep -q running
 docker exec airepro-postfix postconf myhostname | grep -q mail.airepro.solutions
-# Local SMTP port published on host
-ss -lnt | grep -q ':2525' || netstat -lnt | grep -q ':2525'
+(ss -lnt 2>/dev/null || netstat -lnt) | grep -q ":2525"
 echo "Smoke OK: airepro-postfix running, hostname OK, :2525 listening"
-EOF
+'@
+            $remoteScript | & ssh @sshBase $remote 'bash -s'
+            if ($LASTEXITCODE -ne 0) { throw "smoke check failed ($LASTEXITCODE)" }
           '''
         }
       }
@@ -208,7 +264,7 @@ EOF
       echo "Deployed Postfix to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}"
     }
     failure {
-      echo "Deploy failed. Check SSH credentials, DKIM private key, and docker on the VPS."
+      echo "Deploy failed. Check: Windows agent has OpenSSH (ssh/scp), Jenkins SSH credential, DKIM secret file, Docker on VPS."
     }
   }
 }

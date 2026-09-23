@@ -235,7 +235,8 @@ SPF string must contain the **same** IP as the `mail` A record. PTR must match `
 
 1. New Pipeline job → Pipeline script from SCM → this repo  
 2. Script path: `Jenkinsfile`  
-3. First build: set parameters `DEPLOY_HOST=122.180.85.70`, ensure DKIM secret file is set  
-4. Later builds keep existing private key on the server (`rsync` excludes `dkim/*.private`)
+3. Agent: **Windows is supported** (uses `powershell` + OpenSSH `ssh`/`scp`, not `sh`/`rsync`)  
+4. First build: set `DEPLOY_HOST=122.180.85.70`, ensure DKIM secret file is set  
+5. Later builds keep existing private key on the server
 
-VPS must already have Docker + Compose and allow SSH from the Jenkins agent.
+VPS must already have Docker + Compose. The Jenkins Windows agent must have **OpenSSH Client** (`ssh`, `scp`) installed and able to reach the VPS.
