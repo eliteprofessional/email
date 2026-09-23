@@ -72,7 +72,7 @@ pipeline {
         script {
           withCredentials(sshAuthCreds()) {
             if (isUnix()) {
-              sh('''
+              sh('''#!/bin/bash
                 set -euo pipefail
                 ''' + sshVarsUnix() + '''
 
@@ -139,7 +139,7 @@ pipeline {
           try {
             withCredentials([file(credentialsId: credId, variable: 'DKIM_PRIVATE_FILE')] + sshAuthCreds()) {
               if (isUnix()) {
-                sh('''
+                sh('''#!/bin/bash
                   set -euo pipefail
                   ''' + sshVarsUnix() + '''
 
@@ -185,7 +185,7 @@ pipeline {
             writeFile file: 'remote-deploy.sh', text: remoteCmd
 
             if (isUnix()) {
-              sh('''
+              sh('''#!/bin/bash
                 set -euo pipefail
                 ''' + sshVarsUnix() + '''
 
@@ -218,7 +218,7 @@ pipeline {
             writeFile file: 'remote-smoke.sh', text: remoteCmd
 
             if (isUnix()) {
-              sh('''
+              sh('''#!/bin/bash
                 set -euo pipefail
                 ''' + sshVarsUnix() + '''
 
