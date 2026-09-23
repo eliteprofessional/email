@@ -222,21 +222,26 @@ SPF string must contain the **same** IP as the `mail` A record. PTR must match `
 
 ## Jenkins deploy
 
-[`Jenkinsfile`](Jenkinsfile) ships `docker-compose.yml` + public DKIM to the VPS over SSH, then runs `docker compose up -d`.
+[`Jenkinsfile`](Jenkinsfile) assumes **Jenkins runs on the same VPS** as Postfix (no SSH).
 
-### Jenkins credentials to create
+It copies the repo into `/opt/email` (configurable), installs the DKIM private key from Jenkins credentials if present, then runs `docker compose up -d`.
+
+### Why no `vps-ssh-key`?
+
+SSH is only needed when Jenkins is on a **different** machine from the mail host. On one VPS, the job just uses local Docker.
+
+### Jenkins credentials
 
 | Credential ID (default) | Type | Purpose |
 |-------------------------|------|---------|
-| `vps-ssh-key` | SSH Username with private key | SSH into `122.180.85.70` |
-| `airepro-dkim-private` | Secret file | Contents of `dkim/airepro.solutions.private` (gitignored) |
+| `airepro-dkim-private` | Secret file | `dkim/airepro.solutions.private` (gitignored) |
 
 ### Pipeline job
 
-1. New Pipeline job → Pipeline script from SCM → this repo  
-2. Script path: `Jenkinsfile`  
-3. Agent OS is **auto-detected** (`isUnix()` → `sh`, else → `powershell`)  
-4. First build: `DEPLOY_HOST=122.180.85.70`; DKIM secret optional — if missing, pipeline continues and uses a key already on the VPS  
-5. Agent needs OpenSSH (`ssh` / `scp`); VPS needs Docker + Compose
+1. Pipeline from SCM → this repo, script path `Jenkinsfile`  
+2. Agent OS auto-detected (`sh` / `powershell`)  
+3. Ensure Docker is installed on the VPS and the Jenkins user can run `docker`  
+4. First build: upload `airepro-dkim-private`, or pre-create `/opt/email/dkim/airepro.solutions.private`
 
-Windows Jenkins controllers work; Linux agents work the same job.
+Parameter `DEPLOY_PATH` default: `/opt/email`.
+
