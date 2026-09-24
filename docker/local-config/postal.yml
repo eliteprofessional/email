@@ -20,11 +20,11 @@ worker:
   threads: 2
 
 main_db:
-  host: mariadb
+  host: pole.hostitbro.com
   port: 3306
-  username: postal
-  password: postalpassword
-  database: postal
+  username: elitepro_conference
+  password: "hY7ZTN3^gntq3_^7"
+  database: elitepro_conference
   encoding: utf8mb4
 
 message_db:
