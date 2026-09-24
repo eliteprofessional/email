@@ -1,0 +1,55 @@
+version: 2
+
+postal:
+  web_hostname: localhost:5000
+  web_protocol: http
+  smtp_hostname: localhost
+  signing_key_path: /config/signing.key
+
+web_server:
+  default_port: 5000
+  default_bind_address: 0.0.0.0
+  max_threads: 5
+
+smtp_server:
+  default_port: 25
+  default_bind_address: 0.0.0.0
+  tls_enabled: false
+
+worker:
+  threads: 2
+
+main_db:
+  host: mariadb
+  port: 3306
+  username: postal
+  password: postalpassword
+  database: postal
+  encoding: utf8mb4
+
+message_db:
+  host: mariadb
+  port: 3306
+  username: postal
+  password: postalpassword
+  database_name_prefix: postal
+  encoding: utf8mb4
+
+logging:
+  rails_log_enabled: true
+  enabled: true
+  level: INFO
+  highlighting_enabled: false
+
+rails:
+  environment: production
+  secret_key: 7f27856d26e864bafd49d0df37ad3d1339086e86ef0447e0f1814dde5277452fea97dab9e3aad6dfa11bfe359c82ce302d97bf1e58f6103c4408e4fbad4eeccf
+
+dns:
+  mx_records:
+    - localhost
+  spf_include: localhost
+  return_path_domain: rp.localhost
+  route_domain: routes.localhost
+  track_domain: track.localhost
+  dkim_identifier: postal
