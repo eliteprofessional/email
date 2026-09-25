@@ -37,3 +37,7 @@ BRANCH
 node_modules
 yarn.lock
 
+docker/local-config/postal.yml
+docker/local-config/postal.yml.bak
+docker/local-config/signing.key
+
