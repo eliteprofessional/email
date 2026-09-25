@@ -1,28 +1,8 @@
 services:
-  mariadb:
-    image: mariadb:10.11
-    restart: unless-stopped
-    environment:
-      MARIADB_ROOT_PASSWORD: postalrootpassword
-      MARIADB_DATABASE: postal
-      MARIADB_USER: postal
-      MARIADB_PASSWORD: postalpassword
-    volumes:
-      - mariadb_data:/var/lib/mysql
-      - ./docker/local-config/init-mariadb.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -uroot -ppostalrootpassword --silent"]
-      interval: 5s
-      timeout: 5s
-      retries: 15
-
   postal-web:
     image: ghcr.io/postalserver/postal:latest
     restart: unless-stopped
     command: ["postal", "web-server"]
-    depends_on:
-      mariadb:
-        condition: service_healthy
     ports:
       - "5000:5000"
     volumes:
@@ -32,29 +12,23 @@ services:
       PORT: "5000"
       WAIT_FOR_TIMEOUT: 60
       WAIT_FOR_TARGETS: |-
-        mariadb:3306
+        pole.hostitbro.com:3306
 
   postal-worker:
     image: ghcr.io/postalserver/postal:latest
     restart: unless-stopped
     command: ["postal", "worker"]
-    depends_on:
-      mariadb:
-        condition: service_healthy
     volumes:
       - "./docker/local-config:/config"
     environment:
       WAIT_FOR_TIMEOUT: 60
       WAIT_FOR_TARGETS: |-
-        mariadb:3306
+        pole.hostitbro.com:3306
 
   postal-smtp:
     image: ghcr.io/postalserver/postal:latest
     restart: unless-stopped
     command: ["postal", "smtp-server"]
-    depends_on:
-      mariadb:
-        condition: service_healthy
     ports:
       - "2525:25"
     volumes:
@@ -64,7 +38,4 @@ services:
       PORT: "25"
       WAIT_FOR_TIMEOUT: 60
       WAIT_FOR_TARGETS: |-
-        mariadb:3306
-
-volumes:
-  mariadb_data:
+        pole.hostitbro.com:3306
