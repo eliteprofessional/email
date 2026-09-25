@@ -9,9 +9,29 @@ pipeline {
 
   parameters {
     string(
+      name: 'DEPLOY_HOST',
+      defaultValue: 'airepro2@122.180.85.70',
+      description: 'user@host for the target VPS (Jenkins deploys over SSH)'
+    )
+    choice(
+      name: 'SSH_AUTH_MODE',
+      choices: ['password', 'key'],
+      description: 'How Jenkins authenticates to DEPLOY_HOST. "password" uses SSH_PASSWORD_CREDENTIAL_ID. "key" uses SSH_CREDENTIAL_ID (SSH Username with private key).'
+    )
+    string(
+      name: 'SSH_PASSWORD_CREDENTIAL_ID',
+      defaultValue: 'airepro2-vps-password',
+      description: 'Secret text credential holding the DEPLOY_HOST SSH password (used when SSH_AUTH_MODE=password)'
+    )
+    string(
+      name: 'SSH_CREDENTIAL_ID',
+      defaultValue: 'airepro2-vps-ssh',
+      description: '"SSH Username with private key" credential authorized on DEPLOY_HOST (used when SSH_AUTH_MODE=key)'
+    )
+    string(
       name: 'DEPLOY_PATH',
       defaultValue: '/opt/postal',
-      description: 'Install path on this VPS (Jenkins runs here too)'
+      description: 'Install path on the target VPS'
     )
     string(
       name: 'COMPOSE_FILE',
@@ -37,6 +57,7 @@ pipeline {
 
   environment {
     COMPOSE_PROJECT_NAME = 'postal'
+    SSH_OPTS = '-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15'
   }
 
   stages {
@@ -51,142 +72,80 @@ pipeline {
         script {
           env.AGENT_IS_UNIX = isUnix() ? 'true' : 'false'
           echo "Jenkins agent OS: ${isUnix() ? 'Linux/Unix → sh' : 'Windows → powershell'}"
-          echo 'Same-host deploy: no SSH. Docker Compose runs on this machine.'
+          echo "Remote deploy over SSH (${params.SSH_AUTH_MODE} auth) to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}"
         }
       }
     }
 
-    stage('Validate compose') {
+    stage('Sync to target VPS') {
       steps {
         script {
-          if (isUnix()) {
-            sh '''
-              set -e
-              test -f "${COMPOSE_FILE}"
-              command -v docker >/dev/null
-              docker compose -f "${COMPOSE_FILE}" config >/dev/null
-              echo "docker compose config OK (${COMPOSE_FILE})"
-            '''
-          } else {
-            powershell '''
-              if (-not (Test-Path $env:COMPOSE_FILE)) { throw "$env:COMPOSE_FILE not found" }
-              if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'docker not found on agent' }
-              docker compose -f $env:COMPOSE_FILE config | Out-Null
-              if ($LASTEXITCODE -ne 0) { throw 'docker compose config failed' }
-              Write-Host "docker compose config OK ($env:COMPOSE_FILE)"
-            '''
-          }
-        }
-      }
-    }
+          withCredentials(sshAuthCreds()) {
+            if (isUnix()) {
+              sh('''#!/bin/bash
+                set -euo pipefail
+                ''' + sshVarsUnix() + '''
 
-    stage('Install to deploy path') {
-      steps {
-        script {
-          if (isUnix()) {
-            sh '''
-              set -euo pipefail
-              mkdir -p "${DEPLOY_PATH}/docker/local-config"
+                $SSH "$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/docker/local-config'"
 
-              # Preserve existing Postal config / signing key if present
-              if [ -f "${DEPLOY_PATH}/docker/local-config/postal.yml" ]; then
-                cp -a "${DEPLOY_PATH}/docker/local-config/postal.yml" /tmp/postal.yml.bak
-              fi
-              if [ -f "${DEPLOY_PATH}/docker/local-config/signing.key" ]; then
-                cp -a "${DEPLOY_PATH}/docker/local-config/signing.key" /tmp/postal.signing.key.bak
-              fi
+                if command -v rsync >/dev/null 2>&1; then
+                  rsync -az --delete \
+                    -e "$RSH" \
+                    --exclude '.git/' \
+                    --exclude 'vendor/bundle/' \
+                    --exclude 'node_modules/' \
+                    --exclude 'tmp/' \
+                    --exclude 'log/' \
+                    --exclude '.env' \
+                    --exclude '.env.*' \
+                    --exclude 'docker/local-config/postal.yml' \
+                    --exclude 'docker/local-config/signing.key' \
+                    ./ "$DEPLOY_HOST:$DEPLOY_PATH/"
+                else
+                  TARBALL="$(mktemp)"
+                  tar -czf "$TARBALL" \
+                    --exclude=.git \
+                    --exclude=vendor/bundle \
+                    --exclude=node_modules \
+                    --exclude=tmp \
+                    --exclude=log \
+                    --exclude=.env \
+                    --exclude='.env.*' \
+                    --exclude='docker/local-config/postal.yml' \
+                    --exclude='docker/local-config/signing.key' \
+                    .
+                  $SCP "$TARBALL" "$DEPLOY_HOST:/tmp/postal-deploy.tar.gz"
+                  rm -f "$TARBALL"
+                  $SSH "$DEPLOY_HOST" "tar -xzf /tmp/postal-deploy.tar.gz -C '$DEPLOY_PATH' && rm -f /tmp/postal-deploy.tar.gz"
+                fi
 
-              # Sync workspace into DEPLOY_PATH (exclude junk / secrets)
-              if command -v rsync >/dev/null 2>&1; then
-                rsync -a --delete \
-                  --exclude '.git/' \
-                  --exclude 'vendor/bundle/' \
-                  --exclude 'node_modules/' \
-                  --exclude 'tmp/' \
-                  --exclude 'log/' \
-                  --exclude '.env' \
-                  --exclude '.env.*' \
-                  --exclude 'docker/local-config/postal.yml' \
-                  --exclude 'docker/local-config/signing.key' \
-                  ./ "${DEPLOY_PATH}/"
-              else
-                STAGE="$(mktemp -d)"
-                tar -cf - \
-                  --exclude=.git \
-                  --exclude=vendor/bundle \
-                  --exclude=node_modules \
-                  --exclude=tmp \
-                  --exclude=log \
-                  --exclude=.env \
-                  --exclude='.env.*' \
-                  --exclude='docker/local-config/postal.yml' \
-                  --exclude='docker/local-config/signing.key' \
-                  . | tar -xf - -C "${STAGE}"
-                find "${DEPLOY_PATH}" -mindepth 1 -maxdepth 1 ! -name docker -exec rm -rf {} +
-                cp -a "${STAGE}/." "${DEPLOY_PATH}/"
-                rm -rf "${STAGE}"
-              fi
-
-              mkdir -p "${DEPLOY_PATH}/docker/local-config"
-              if [ -f /tmp/postal.yml.bak ]; then
-                mv /tmp/postal.yml.bak "${DEPLOY_PATH}/docker/local-config/postal.yml"
-                chmod 600 "${DEPLOY_PATH}/docker/local-config/postal.yml" || true
-              fi
-              if [ -f /tmp/postal.signing.key.bak ]; then
-                mv /tmp/postal.signing.key.bak "${DEPLOY_PATH}/docker/local-config/signing.key"
-                chmod 600 "${DEPLOY_PATH}/docker/local-config/signing.key" || true
-              fi
-
-              ls -la "${DEPLOY_PATH}" "${DEPLOY_PATH}/docker/local-config" || true
-            '''
-          } else {
-            powershell '''
-              $ErrorActionPreference = 'Stop'
-              $deployPath = $env:DEPLOY_PATH
-              $configDir = Join-Path $deployPath 'docker\\local-config'
-              New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-
-              $bakYml = Join-Path $env:TEMP 'postal.yml.bak'
-              $bakKey = Join-Path $env:TEMP 'postal.signing.key.bak'
-              $existingYml = Join-Path $configDir 'postal.yml'
-              $existingKey = Join-Path $configDir 'signing.key'
-              if (Test-Path $existingYml) { Copy-Item $existingYml $bakYml -Force }
-              if (Test-Path $existingKey) { Copy-Item $existingKey $bakKey -Force }
-
-              $stage = Join-Path $env:TEMP ("postal-local-" + [guid]::NewGuid())
-              New-Item -ItemType Directory -Path $stage | Out-Null
-              try {
-                $exclude = @('.git', 'vendor', 'node_modules', 'tmp', 'log')
-                Get-ChildItem -Force | Where-Object {
-                  $_.Name -notin $exclude -and $_.Name -notlike '.env*'
-                } | ForEach-Object {
-                  Copy-Item $_.FullName -Destination (Join-Path $stage $_.Name) -Recurse -Force
-                }
-                $stageYml = Join-Path $stage 'docker\\local-config\\postal.yml'
-                $stageKey = Join-Path $stage 'docker\\local-config\\signing.key'
-                if (Test-Path $stageYml) { Remove-Item $stageYml -Force }
-                if (Test-Path $stageKey) { Remove-Item $stageKey -Force }
-
-                if (Test-Path $deployPath) {
-                  Get-ChildItem $deployPath -Force | ForEach-Object {
-                    Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                $SSH "$DEPLOY_HOST" "ls -la '$DEPLOY_PATH' '$DEPLOY_PATH/docker/local-config'"
+              ''')
+            } else {
+              powershell(sshVarsWindows() + '''
+                $stage = Join-Path $env:TEMP ("postal-deploy-" + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path $stage | Out-Null
+                try {
+                  $exclude = @('.git', 'vendor', 'node_modules', 'tmp', 'log')
+                  Get-ChildItem -Force | Where-Object {
+                    $_.Name -notin $exclude -and $_.Name -notlike '.env*'
+                  } | ForEach-Object {
+                    Copy-Item $_.FullName -Destination (Join-Path $stage $_.Name) -Recurse -Force
                   }
-                }
-                New-Item -ItemType Directory -Force -Path $deployPath | Out-Null
-                Copy-Item (Join-Path $stage '*') -Destination $deployPath -Recurse -Force
+                  $stageYml = Join-Path $stage 'docker\\local-config\\postal.yml'
+                  $stageKey = Join-Path $stage 'docker\\local-config\\signing.key'
+                  if (Test-Path $stageYml) { Remove-Item $stageYml -Force }
+                  if (Test-Path $stageKey) { Remove-Item $stageKey -Force }
 
-                New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-                if (Test-Path $bakYml) {
-                  Copy-Item $bakYml (Join-Path $configDir 'postal.yml') -Force
+                  Invoke-RemoteSsh @('mkdir', '-p', "'$deployPath/docker/local-config'")
+                  Invoke-RemoteScp (Join-Path $stage '*') "${deployHost}:${deployPath}/" -Recurse
+                } finally {
+                  Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
                 }
-                if (Test-Path $bakKey) {
-                  Copy-Item $bakKey (Join-Path $configDir 'signing.key') -Force
-                }
-              } finally {
-                Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
-              }
-              Get-ChildItem $deployPath | Format-Table Name
-            '''
+
+                Invoke-RemoteSsh @('ls', '-la', "'$deployPath'")
+              ''')
+            }
           }
         }
       }
@@ -195,12 +154,12 @@ pipeline {
     stage('Install Postal secrets') {
       steps {
         script {
-          installSecretFile(
+          installRemoteSecretFile(
             params.POSTAL_CONFIG_CREDENTIAL_ID?.trim(),
             'postal.yml',
             'Postal config (postal.yml)'
           )
-          installSecretFile(
+          installRemoteSecretFile(
             params.SIGNING_KEY_CREDENTIAL_ID?.trim(),
             'signing.key',
             'Postal signing key'
@@ -212,43 +171,44 @@ pipeline {
     stage('Docker compose up') {
       steps {
         script {
-          if (isUnix()) {
-            sh '''
+          withCredentials(sshAuthCreds()) {
+            def upFlags = params.FORCE_RECREATE ? '-d --force-recreate' : '-d'
+            def composeFile = params.COMPOSE_FILE
+            def remoteCmd = """
               set -euo pipefail
-              cd "${DEPLOY_PATH}"
+              trap 'rm -f "\$0"' EXIT
+              cd '${params.DEPLOY_PATH}'
               if [ ! -f docker/local-config/postal.yml ]; then
-                echo "ERROR: ${DEPLOY_PATH}/docker/local-config/postal.yml missing."
-                echo "Upload Jenkins secret postal-config-yml or copy the file once."
+                echo 'ERROR: ${params.DEPLOY_PATH}/docker/local-config/postal.yml missing.'
+                echo 'Upload Jenkins secret ${params.POSTAL_CONFIG_CREDENTIAL_ID} or copy the file once.'
                 exit 1
               fi
               if [ ! -f docker/local-config/signing.key ]; then
-                echo "ERROR: ${DEPLOY_PATH}/docker/local-config/signing.key missing."
-                echo "Upload Jenkins secret postal-signing-key or copy the file once."
+                echo 'ERROR: ${params.DEPLOY_PATH}/docker/local-config/signing.key missing.'
+                echo 'Upload Jenkins secret ${params.SIGNING_KEY_CREDENTIAL_ID} or copy the file once.'
                 exit 1
               fi
-              UP_FLAGS="-d"
-              if [ "${FORCE_RECREATE}" = "true" ]; then UP_FLAGS="-d --force-recreate"; fi
-              docker compose -f "${COMPOSE_FILE}" config >/dev/null
-              docker compose -f "${COMPOSE_FILE}" pull
-              docker compose -f "${COMPOSE_FILE}" up ${UP_FLAGS}
-              docker compose -f "${COMPOSE_FILE}" ps
-            '''
-          } else {
-            powershell '''
-              $ErrorActionPreference = 'Stop'
-              Set-Location $env:DEPLOY_PATH
-              $yml = Join-Path $env:DEPLOY_PATH 'docker\\local-config\\postal.yml'
-              $key = Join-Path $env:DEPLOY_PATH 'docker\\local-config\\signing.key'
-              if (-not (Test-Path $yml)) { throw "postal.yml missing at $yml" }
-              if (-not (Test-Path $key)) { throw "signing.key missing at $key" }
-              $upFlags = if ($env:FORCE_RECREATE -eq 'true') { @('-d', '--force-recreate') } else { @('-d') }
-              docker compose -f $env:COMPOSE_FILE config | Out-Null
-              if ($LASTEXITCODE -ne 0) { throw 'compose config failed' }
-              docker compose -f $env:COMPOSE_FILE pull
-              docker compose -f $env:COMPOSE_FILE up @upFlags
-              if ($LASTEXITCODE -ne 0) { throw 'compose up failed' }
-              docker compose -f $env:COMPOSE_FILE ps
-            '''
+              docker compose -f '${composeFile}' config >/dev/null
+              docker compose -f '${composeFile}' pull
+              docker compose -f '${composeFile}' up ${upFlags}
+              docker compose -f '${composeFile}' ps
+            """.stripIndent()
+            writeFile file: 'remote-deploy.sh', text: remoteCmd
+
+            if (isUnix()) {
+              sh('''#!/bin/bash
+                set -euo pipefail
+                ''' + sshVarsUnix() + '''
+
+                $SCP remote-deploy.sh "$DEPLOY_HOST:/tmp/postal-remote-deploy.sh"
+                $SSH "$DEPLOY_HOST" "bash /tmp/postal-remote-deploy.sh"
+              ''')
+            } else {
+              powershell(sshVarsWindows() + '''
+                Invoke-RemoteScp 'remote-deploy.sh' "${deployHost}:/tmp/postal-remote-deploy.sh"
+                Invoke-RemoteSsh @('bash', '/tmp/postal-remote-deploy.sh')
+              ''')
+            }
           }
         }
       }
@@ -257,51 +217,50 @@ pipeline {
     stage('Smoke check') {
       steps {
         script {
-          if (isUnix()) {
-            sh '''
+          withCredentials(sshAuthCreds()) {
+            def composeFile = params.COMPOSE_FILE
+            def remoteCmd = """
               set -euo pipefail
-              cd "${DEPLOY_PATH}"
+              trap 'rm -f "\$0"' EXIT
+              cd '${params.DEPLOY_PATH}'
 
               ready=""
-              for i in $(seq 1 30); do
-                web="$(docker compose -f "${COMPOSE_FILE}" ps --status running --services 2>/dev/null | grep -c '^postal-web$' || true)"
-                smtp="$(docker compose -f "${COMPOSE_FILE}" ps --status running --services 2>/dev/null | grep -c '^postal-smtp$' || true)"
-                if [ "$web" = "1" ] && [ "$smtp" = "1" ]; then
+              for i in \$(seq 1 30); do
+                web="\$(docker compose -f '${composeFile}' ps --status running --services 2>/dev/null | grep -c '^postal-web\$' || true)"
+                smtp="\$(docker compose -f '${composeFile}' ps --status running --services 2>/dev/null | grep -c '^postal-smtp\$' || true)"
+                if [ "\$web" = "1" ] && [ "\$smtp" = "1" ]; then
                   ready="1"
                   break
                 fi
                 sleep 2
               done
-              if [ -z "$ready" ]; then
+              if [ -z "\$ready" ]; then
                 echo "ERROR: postal-web / postal-smtp not running in time"
-                docker compose -f "${COMPOSE_FILE}" ps || true
-                docker compose -f "${COMPOSE_FILE}" logs --tail 40 || true
+                docker compose -f '${composeFile}' ps || true
+                docker compose -f '${composeFile}' logs --tail 40 || true
                 exit 1
               fi
 
               (ss -lnt 2>/dev/null || netstat -lnt) | grep -q ':5000'
               (ss -lnt 2>/dev/null || netstat -lnt) | grep -q ':2525'
               echo "Smoke OK: postal-web + postal-smtp running, :5000 and :2525 listening"
-            '''
-          } else {
-            powershell '''
-              $ErrorActionPreference = 'Stop'
-              Set-Location $env:DEPLOY_PATH
-              $ready = $false
-              for ($i = 1; $i -le 30; $i++) {
-                $services = docker compose -f $env:COMPOSE_FILE ps --status running --services 2>$null
-                if (($services -match '^postal-web$') -and ($services -match '^postal-smtp$')) {
-                  $ready = $true
-                  break
-                }
-                Start-Sleep -Seconds 2
-              }
-              if (-not $ready) {
-                docker compose -f $env:COMPOSE_FILE ps
-                throw 'postal-web / postal-smtp not running in time'
-              }
-              Write-Host 'Smoke OK: postal-web + postal-smtp running'
-            '''
+            """.stripIndent()
+            writeFile file: 'remote-smoke.sh', text: remoteCmd
+
+            if (isUnix()) {
+              sh('''#!/bin/bash
+                set -euo pipefail
+                ''' + sshVarsUnix() + '''
+
+                $SCP remote-smoke.sh "$DEPLOY_HOST:/tmp/postal-remote-smoke.sh"
+                $SSH "$DEPLOY_HOST" "bash /tmp/postal-remote-smoke.sh"
+              ''')
+            } else {
+              powershell(sshVarsWindows() + '''
+                Invoke-RemoteScp 'remote-smoke.sh' "${deployHost}:/tmp/postal-remote-smoke.sh"
+                Invoke-RemoteSsh @('bash', '/tmp/postal-remote-smoke.sh')
+              ''')
+            }
           }
         }
       }
@@ -310,40 +269,96 @@ pipeline {
 
   post {
     success {
-      echo "Postal deployed locally at ${params.DEPLOY_PATH} (same VPS as Jenkins, compose ${params.COMPOSE_FILE})"
+      echo "Postal deployed to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH} over SSH (${params.SSH_AUTH_MODE} auth, web :5000 / smtp :2525)"
     }
     failure {
-      echo "Deploy failed. Same-host mode needs: Docker on this VPS, write access to DEPLOY_PATH, and Postal secrets (credentials postal-config-yml / postal-signing-key or files already in DEPLOY_PATH/docker/local-config/)."
+      script {
+        def authHint = params.SSH_AUTH_MODE == 'password'
+          ? "Secret text credential '${params.SSH_PASSWORD_CREDENTIAL_ID}' with the ${params.DEPLOY_HOST} password"
+          : "SSH credential '${params.SSH_CREDENTIAL_ID}' authorized on ${params.DEPLOY_HOST}"
+        echo "Deploy failed. Needs: ${authHint}, Docker on the target VPS, write access to ${params.DEPLOY_PATH}, and Postal secrets (credentials ${params.POSTAL_CONFIG_CREDENTIAL_ID} / ${params.SIGNING_KEY_CREDENTIAL_ID} or files already in ${params.DEPLOY_PATH}/docker/local-config/)."
+      }
     }
   }
 }
 
-def installSecretFile(String credId, String destName, String label) {
+// ---- SSH auth helpers (password today, private key later — see SSH_AUTH_MODE) ----
+
+def sshAuthCreds() {
+  if (params.SSH_AUTH_MODE == 'password') {
+    return [string(credentialsId: params.SSH_PASSWORD_CREDENTIAL_ID, variable: 'SSHPASS')]
+  }
+  return [sshUserPrivateKey(credentialsId: params.SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY')]
+}
+
+def sshVarsUnix() {
+  return '''
+                if [ "$SSH_AUTH_MODE" = "password" ]; then
+                  SSH="sshpass -e ssh $SSH_OPTS"
+                  SCP="sshpass -e scp $SSH_OPTS"
+                  RSH="sshpass -e ssh $SSH_OPTS"
+                else
+                  SSH="ssh -i $SSH_KEY $SSH_OPTS"
+                  SCP="scp -i $SSH_KEY $SSH_OPTS"
+                  RSH="ssh -i $SSH_KEY $SSH_OPTS"
+                fi
+'''
+}
+
+def sshVarsWindows() {
+  return '''
+                $ErrorActionPreference = 'Stop'
+                $sshOpts = $env:SSH_OPTS -split ' '
+                $deployHost = $env:DEPLOY_HOST
+                $deployPath = $env:DEPLOY_PATH
+                $usePassword = $env:SSH_AUTH_MODE -eq 'password'
+
+                function Invoke-RemoteSsh([string[]]$remoteArgs) {
+                  if ($usePassword) {
+                    & plink -pw $env:SSHPASS -batch @sshOpts $deployHost @remoteArgs
+                  } else {
+                    & ssh -i $env:SSH_KEY @sshOpts $deployHost @remoteArgs
+                  }
+                  if ($LASTEXITCODE -ne 0) { throw "remote command failed: $remoteArgs" }
+                }
+
+                function Invoke-RemoteScp([string]$src, [string]$dst, [switch]$Recurse) {
+                  $recurseFlag = @()
+                  if ($Recurse.IsPresent) { $recurseFlag = @('-r') }
+                  if ($usePassword) {
+                    & pscp -pw $env:SSHPASS @sshOpts @recurseFlag $src $dst
+                  } else {
+                    & scp -i $env:SSH_KEY @sshOpts @recurseFlag $src $dst
+                  }
+                  if ($LASTEXITCODE -ne 0) { throw "remote copy failed: $src -> $dst" }
+                }
+'''
+}
+
+def installRemoteSecretFile(String credId, String destName, String label) {
   if (!credId) {
-    echo "No credential ID for ${label} — continuing if file already exists under DEPLOY_PATH/docker/local-config/"
+    echo "No credential ID for ${label} — continuing if file already exists under DEPLOY_PATH/docker/local-config/ on the target"
     return
   }
   try {
-    withCredentials([file(credentialsId: credId, variable: 'SECRET_FILE')]) {
+    withCredentials([file(credentialsId: credId, variable: 'SECRET_FILE')] + sshAuthCreds()) {
       if (isUnix()) {
-        sh """
+        sh('''#!/bin/bash
           set -euo pipefail
-          mkdir -p "\${DEPLOY_PATH}/docker/local-config"
-          cp "\${SECRET_FILE}" "\${DEPLOY_PATH}/docker/local-config/${destName}"
-          chmod 600 "\${DEPLOY_PATH}/docker/local-config/${destName}"
-          echo "${label} installed"
-        """
+          ''' + sshVarsUnix() + """
+          \$SCP "\$SECRET_FILE" "\$DEPLOY_HOST:\$DEPLOY_PATH/docker/local-config/${destName}"
+          \$SSH "\$DEPLOY_HOST" "chmod 600 '\$DEPLOY_PATH/docker/local-config/${destName}'"
+          echo "${label} installed on \$DEPLOY_HOST"
+""")
       } else {
-        powershell """
-          \$ErrorActionPreference = 'Stop'
-          \$destDir = Join-Path \$env:DEPLOY_PATH 'docker\\local-config'
-          New-Item -ItemType Directory -Force -Path \$destDir | Out-Null
-          Copy-Item \$env:SECRET_FILE (Join-Path \$destDir '${destName}') -Force
+        powershell(sshVarsWindows() + """
+          Invoke-RemoteScp \$env:SECRET_FILE "\${deployHost}:\${deployPath}/docker/local-config/${destName}"
+          Invoke-RemoteSsh @('chmod', '600', "'\$deployPath/docker/local-config/${destName}'")
           Write-Host '${label} installed'
-        """
+""")
       }
     }
   } catch (err) {
-    echo "${label} credential '${credId}' unavailable (${err}). Continuing if file already on disk."
+    echo "${label} credential '${credId}' unavailable (${err}). Continuing if file already on the target."
   }
 }
