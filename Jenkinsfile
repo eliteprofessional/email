@@ -113,9 +113,7 @@ pipeline {
                     --exclude 'backup/' \
                     --exclude 'billionmail.conf' \
                     --exclude 'conf/postfix/sql/' \
-                    --exclude 'conf/postfix/conf/extra.cf' \
-                    --exclude 'conf/postfix/conf/vmail_ssl.map' \
-                    --exclude 'conf/postfix/conf/vmail_ssl.map.db' \
+                    --exclude 'conf/postfix/conf/' \
                     --exclude 'conf/core/fail2ban/' \
                     --exclude 'conf/dovecot/conf.d/dovecot-sql.conf.ext' \
                     --exclude 'conf/dovecot/conf.d/extra.cf' \
