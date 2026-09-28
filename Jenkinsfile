@@ -277,7 +277,18 @@ docker logs billionmail-core-billionmail-1 --tail 40 || true
                 $SSH "$DEPLOY_HOST" "MAIL_HOSTNAME='${MAIL_HOSTNAME}' HTTP_PORT='${HTTP_PORT}' bash -s" <<'REMOTE'
 set -eu
 docker inspect -f '{{.State.Status}}' billionmail-core-billionmail-1 | grep -q running
-curl -fsS "http://127.0.0.1:${HTTP_PORT}/" | grep -q BillionMail
+ready=""
+for i in $(seq 1 15); do
+  if curl -fsS "http://127.0.0.1:${HTTP_PORT}/" | grep -q BillionMail; then
+    ready="1"
+    break
+  fi
+  sleep 2
+done
+if [ -z "$ready" ]; then
+  echo "ERROR: core web UI on :${HTTP_PORT} not ready in time"
+  exit 1
+fi
 docker exec billionmail-postfix-billionmail-1 postconf myhostname | grep -F -q "${MAIL_HOSTNAME}"
 echo "Smoke OK: core running, HTTP title BillionMail, myhostname ${MAIL_HOSTNAME}"
 REMOTE
@@ -287,7 +298,18 @@ REMOTE
                 $remote = @"
 set -eu
 docker inspect -f '{{.State.Status}}' billionmail-core-billionmail-1 | grep -q running
-curl -fsS "http://127.0.0.1:$($env:HTTP_PORT)/" | grep -q BillionMail
+ready=""
+for i in `$(seq 1 15); do
+  if curl -fsS "http://127.0.0.1:$($env:HTTP_PORT)/" | grep -q BillionMail; then
+    ready="1"
+    break
+  fi
+  sleep 2
+done
+if [ -z "`$ready" ]; then
+  echo "ERROR: core web UI on :$($env:HTTP_PORT) not ready in time"
+  exit 1
+fi
 docker exec billionmail-postfix-billionmail-1 postconf myhostname | grep -F -q "$($env:MAIL_HOSTNAME)"
 echo "Smoke OK on VPS"
 "@
