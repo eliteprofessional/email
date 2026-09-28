@@ -44,6 +44,8 @@ pipeline {
     COMPOSE_PROJECT_NAME = 'billionmail'
     MAIL_HOSTNAME = 'mail.airepro.solutions'
     SERVER_IP = '122.180.85.70'
+    HTTP_PORT = '5678'
+    HTTPS_PORT = '5679'
     SSH_OPTS = '-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15'
   }
 
@@ -187,7 +189,7 @@ pipeline {
               sh('''#!/bin/bash
                 set -eu
                 ''' + sshVarsUnix() + '''
-                $SSH "$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' MAIL_HOSTNAME='${MAIL_HOSTNAME}' FORCE_RECREATE='${FORCE_RECREATE}' bash -s" <<'REMOTE'
+                $SSH "$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' MAIL_HOSTNAME='${MAIL_HOSTNAME}' FORCE_RECREATE='${FORCE_RECREATE}' HTTP_PORT='${HTTP_PORT}' HTTPS_PORT='${HTTPS_PORT}' bash -s" <<'REMOTE'
 set -eu
 cd "${DEPLOY_PATH}"
 if [ ! -f .env ]; then
@@ -197,6 +199,18 @@ if [ ! -f .env ]; then
 else
   echo "Keeping existing .env"
 fi
+set_env() {
+  key="$1"
+  val="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i "s/^${key}=.*/${key}=${val}/" .env
+  else
+    echo "${key}=${val}" >> .env
+  fi
+}
+set_env HTTP_PORT "${HTTP_PORT}"
+set_env HTTPS_PORT "${HTTPS_PORT}"
+echo "Web ports HTTP_PORT=${HTTP_PORT} HTTPS_PORT=${HTTPS_PORT}"
 sed -i 's/\r$//' conf/redis/redis-conf.sh
 if [ ! -f .env ]; then
   echo "ERROR: .env missing."
@@ -223,6 +237,18 @@ if [ ! -f .env ]; then
 else
   echo "Keeping existing .env"
 fi
+set_env() {
+  key="`$1"
+  val="`$2"
+  if grep -q "^`${key}=" .env; then
+    sed -i "s/^`${key}=.*/`${key}=`${val}/" .env
+  else
+    echo "`${key}=`${val}" >> .env
+  fi
+}
+set_env HTTP_PORT "$($env:HTTP_PORT)"
+set_env HTTPS_PORT "$($env:HTTPS_PORT)"
+echo "Web ports HTTP_PORT=$($env:HTTP_PORT) HTTPS_PORT=$($env:HTTPS_PORT)"
 sed -i 's/\r$//' conf/redis/redis-conf.sh
 UP_FLAGS="-d"
 if [ "$($env:FORCE_RECREATE)" = "true" ]; then UP_FLAGS="-d --force-recreate"; fi
@@ -248,10 +274,10 @@ docker logs billionmail-core-billionmail-1 --tail 40 || true
               sh('''#!/bin/bash
                 set -eu
                 ''' + sshVarsUnix() + '''
-                $SSH "$DEPLOY_HOST" "MAIL_HOSTNAME='${MAIL_HOSTNAME}' bash -s" <<'REMOTE'
+                $SSH "$DEPLOY_HOST" "MAIL_HOSTNAME='${MAIL_HOSTNAME}' HTTP_PORT='${HTTP_PORT}' bash -s" <<'REMOTE'
 set -eu
 docker inspect -f '{{.State.Status}}' billionmail-core-billionmail-1 | grep -q running
-curl -fsS http://127.0.0.1/ | grep -q BillionMail
+curl -fsS "http://127.0.0.1:${HTTP_PORT}/" | grep -q BillionMail
 docker exec billionmail-postfix-billionmail-1 postconf myhostname | grep -F -q "${MAIL_HOSTNAME}"
 echo "Smoke OK: core running, HTTP title BillionMail, myhostname ${MAIL_HOSTNAME}"
 REMOTE
@@ -261,7 +287,7 @@ REMOTE
                 $remote = @"
 set -eu
 docker inspect -f '{{.State.Status}}' billionmail-core-billionmail-1 | grep -q running
-curl -fsS http://127.0.0.1/ | grep -q BillionMail
+curl -fsS "http://127.0.0.1:$($env:HTTP_PORT)/" | grep -q BillionMail
 docker exec billionmail-postfix-billionmail-1 postconf myhostname | grep -F -q "$($env:MAIL_HOSTNAME)"
 echo "Smoke OK on VPS"
 "@
@@ -276,7 +302,7 @@ echo "Smoke OK on VPS"
 
   post {
     success {
-      echo "BillionMail deployed to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}. Point DNS A/SPF/PTR at ${env.SERVER_IP}. Panel: http://${env.SERVER_IP}/billion"
+      echo "BillionMail deployed to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}. Point DNS A/SPF/PTR at ${env.SERVER_IP}. Panel: http://${env.SERVER_IP}:${env.HTTP_PORT}/billion"
     }
     failure {
       script {
