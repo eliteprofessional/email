@@ -10,18 +10,28 @@ pipeline {
   parameters {
     string(
       name: 'DEPLOY_HOST',
-      defaultValue: 'root@195.211.46.238',
-      description: 'SSH target for the BillionMail VPS'
+      defaultValue: 'airepro2@122.180.85.70',
+      description: 'user@host for the BillionMail VPS (Jenkins deploys over SSH)'
+    )
+    choice(
+      name: 'SSH_AUTH_MODE',
+      choices: ['password', 'key'],
+      description: 'How Jenkins authenticates to DEPLOY_HOST. "password" uses SSH_PASSWORD_CREDENTIAL_ID. "key" uses SSH_CREDENTIAL_ID (SSH Username with private key).'
+    )
+    string(
+      name: 'SSH_PASSWORD_CREDENTIAL_ID',
+      defaultValue: 'airepro2-vps-password',
+      description: 'Secret text credential holding the DEPLOY_HOST SSH password (used when SSH_AUTH_MODE=password)'
+    )
+    string(
+      name: 'SSH_CREDENTIAL_ID',
+      defaultValue: 'airepro2-vps-ssh',
+      description: '"SSH Username with private key" credential authorized on DEPLOY_HOST (used when SSH_AUTH_MODE=key)'
     )
     string(
       name: 'DEPLOY_PATH',
       defaultValue: '/opt/BillionMail',
       description: 'Install path on the VPS'
-    )
-    string(
-      name: 'SSH_CREDENTIAL_ID',
-      defaultValue: '',
-      description: 'Optional Jenkins SSH private key credential. Empty uses the agent default key for root@195.211.46.238'
     )
     booleanParam(
       name: 'FORCE_RECREATE',
@@ -33,7 +43,8 @@ pipeline {
   environment {
     COMPOSE_PROJECT_NAME = 'billionmail'
     MAIL_HOSTNAME = 'mail.airepro.solutions'
-    SERVER_IP = '195.211.46.238'
+    SERVER_IP = '122.180.85.70'
+    SSH_OPTS = '-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15'
   }
 
   stages {
@@ -47,7 +58,7 @@ pipeline {
       steps {
         script {
           echo "Jenkins agent OS: ${isUnix() ? 'Linux/Unix → sh' : 'Windows → powershell'}"
-          echo "Remote deploy: ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}"
+          echo "Remote deploy over SSH (${params.SSH_AUTH_MODE} auth) to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}"
         }
       }
     }
@@ -74,18 +85,14 @@ pipeline {
     stage('Sync to VPS') {
       steps {
         script {
-          def cred = params.SSH_CREDENTIAL_ID?.trim()
-          def sync = {
+          withCredentials(sshAuthCreds()) {
             if (isUnix()) {
-              sh '''
+              sh('''#!/bin/bash
                 set -eu
-                SSH_OPTS="-o StrictHostKeyChecking=accept-new"
-                if [ -n "${SSH_KEY:-}" ]; then
-                  SSH_OPTS="${SSH_OPTS} -i ${SSH_KEY} -o IdentitiesOnly=yes"
-                fi
-                ssh ${SSH_OPTS} "${DEPLOY_HOST}" "mkdir -p '${DEPLOY_PATH}'"
+                ''' + sshVarsUnix() + '''
+                $SSH "$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
                 if command -v rsync >/dev/null 2>&1; then
-                  rsync -a --delete -e "ssh ${SSH_OPTS}" \
+                  rsync -a --delete -e "$RSH" \
                     --exclude '.git/' \
                     --exclude 'node_modules/' \
                     --exclude '.env' \
@@ -112,7 +119,7 @@ pipeline {
                     --exclude 'conf/dovecot/conf.d/extra.cf' \
                     --exclude 'conf/rspamd/local.d/dkim_signing.conf' \
                     --exclude 'conf/rspamd/local.d/redis.conf' \
-                    ./ "${DEPLOY_HOST}:${DEPLOY_PATH}/"
+                    ./ "$DEPLOY_HOST:$DEPLOY_PATH/"
                 else
                   tar -cf - \
                     --exclude=.git \
@@ -132,17 +139,13 @@ pipeline {
                     --exclude=php-sock \
                     --exclude=backup \
                     --exclude=billionmail.conf \
-                    . | ssh ${SSH_OPTS} "${DEPLOY_HOST}" "tar -xf - -C '${DEPLOY_PATH}'"
+                    . | $SSH "$DEPLOY_HOST" "tar -xf - -C '$DEPLOY_PATH'"
                 fi
                 echo "Synced to ${DEPLOY_HOST}:${DEPLOY_PATH}"
-              '''
+              ''')
             } else {
-              powershell '''
-                $ErrorActionPreference = 'Stop'
-                $sshOpts = @('-o', 'StrictHostKeyChecking=accept-new')
-                if ($env:SSH_KEY) { $sshOpts += @('-i', $env:SSH_KEY, '-o', 'IdentitiesOnly=yes') }
-                & ssh @sshOpts $env:DEPLOY_HOST "mkdir -p '$($env:DEPLOY_PATH)'"
-                if ($LASTEXITCODE -ne 0) { throw 'ssh mkdir failed' }
+              powershell(sshVarsWindows() + '''
+                Invoke-RemoteSsh @('mkdir', '-p', "'$deployPath'")
 
                 $stage = Join-Path $env:TEMP ("billionmail-" + [guid]::NewGuid())
                 New-Item -ItemType Directory -Path $stage | Out-Null
@@ -157,30 +160,20 @@ pipeline {
                     Copy-Item $_.FullName -Destination (Join-Path $stage $_.Name) -Recurse -Force
                   }
                   $tar = Join-Path $env:TEMP ("billionmail-" + [guid]::NewGuid() + '.tar')
-                  if (Get-Command tar -ErrorAction SilentlyContinue) {
-                    & tar -cf $tar -C $stage .
-                    if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
-                    & scp @sshOpts $tar "$($env:DEPLOY_HOST):/tmp/billionmail-src.tar"
-                    if ($LASTEXITCODE -ne 0) { throw 'scp failed' }
-                    & ssh @sshOpts $env:DEPLOY_HOST "tar -xf /tmp/billionmail-src.tar -C '$($env:DEPLOY_PATH)' && rm -f /tmp/billionmail-src.tar"
-                    if ($LASTEXITCODE -ne 0) { throw 'remote untar failed' }
-                    Remove-Item $tar -Force -ErrorAction SilentlyContinue
-                  } else {
+                  if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
                     throw 'tar is required on the Windows agent to sync the repo'
                   }
+                  & tar -cf $tar -C $stage .
+                  if ($LASTEXITCODE -ne 0) { throw 'tar failed' }
+                  Invoke-RemoteScp $tar "${deployHost}:/tmp/billionmail-src.tar"
+                  Invoke-RemoteSsh @("tar -xf /tmp/billionmail-src.tar -C '$deployPath' && rm -f /tmp/billionmail-src.tar")
+                  Remove-Item $tar -Force -ErrorAction SilentlyContinue
                 } finally {
                   Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
                 }
-                Write-Host "Synced to $($env:DEPLOY_HOST):$($env:DEPLOY_PATH)"
-              '''
+                Write-Host "Synced to ${deployHost}:${deployPath}"
+              ''')
             }
-          }
-          if (cred) {
-            withCredentials([sshUserPrivateKey(credentialsId: cred, keyFileVariable: 'SSH_KEY')]) {
-              sync()
-            }
-          } else {
-            sync()
           }
         }
       }
@@ -189,16 +182,12 @@ pipeline {
     stage('Docker compose up') {
       steps {
         script {
-          def cred = params.SSH_CREDENTIAL_ID?.trim()
-          def up = {
+          withCredentials(sshAuthCreds()) {
             if (isUnix()) {
-              sh '''
+              sh('''#!/bin/bash
                 set -eu
-                SSH_OPTS="-o StrictHostKeyChecking=accept-new"
-                if [ -n "${SSH_KEY:-}" ]; then
-                  SSH_OPTS="${SSH_OPTS} -i ${SSH_KEY} -o IdentitiesOnly=yes"
-                fi
-                ssh ${SSH_OPTS} "${DEPLOY_HOST}" "DEPLOY_PATH='${DEPLOY_PATH}' MAIL_HOSTNAME='${MAIL_HOSTNAME}' FORCE_RECREATE='${FORCE_RECREATE}' bash -s" <<'REMOTE'
+                ''' + sshVarsUnix() + '''
+                $SSH "$DEPLOY_HOST" "DEPLOY_PATH='${DEPLOY_PATH}' MAIL_HOSTNAME='${MAIL_HOSTNAME}' FORCE_RECREATE='${FORCE_RECREATE}' bash -s" <<'REMOTE'
 set -eu
 cd "${DEPLOY_PATH}"
 if [ ! -f .env ]; then
@@ -221,12 +210,9 @@ docker compose up ${UP_FLAGS}
 docker compose ps
 docker logs billionmail-core-billionmail-1 --tail 40 || true
 REMOTE
-              '''
+              ''')
             } else {
-              powershell '''
-                $ErrorActionPreference = 'Stop'
-                $sshOpts = @('-o', 'StrictHostKeyChecking=accept-new')
-                if ($env:SSH_KEY) { $sshOpts += @('-i', $env:SSH_KEY, '-o', 'IdentitiesOnly=yes') }
+              powershell(sshVarsWindows() + '''
                 $remote = @"
 set -eu
 cd "$($env:DEPLOY_PATH)"
@@ -246,17 +232,9 @@ docker compose up `$UP_FLAGS
 docker compose ps
 docker logs billionmail-core-billionmail-1 --tail 40 || true
 "@
-                $remote | & ssh @sshOpts $env:DEPLOY_HOST 'bash -s'
-                if ($LASTEXITCODE -ne 0) { throw 'remote docker compose up failed' }
-              '''
+                Invoke-RemoteBash $remote
+              ''')
             }
-          }
-          if (cred) {
-            withCredentials([sshUserPrivateKey(credentialsId: cred, keyFileVariable: 'SSH_KEY')]) {
-              up()
-            }
-          } else {
-            up()
           }
         }
       }
@@ -265,28 +243,21 @@ docker logs billionmail-core-billionmail-1 --tail 40 || true
     stage('Smoke check') {
       steps {
         script {
-          def cred = params.SSH_CREDENTIAL_ID?.trim()
-          def smoke = {
+          withCredentials(sshAuthCreds()) {
             if (isUnix()) {
-              sh '''
+              sh('''#!/bin/bash
                 set -eu
-                SSH_OPTS="-o StrictHostKeyChecking=accept-new"
-                if [ -n "${SSH_KEY:-}" ]; then
-                  SSH_OPTS="${SSH_OPTS} -i ${SSH_KEY} -o IdentitiesOnly=yes"
-                fi
-                ssh ${SSH_OPTS} "${DEPLOY_HOST}" "MAIL_HOSTNAME='${MAIL_HOSTNAME}' bash -s" <<'REMOTE'
+                ''' + sshVarsUnix() + '''
+                $SSH "$DEPLOY_HOST" "MAIL_HOSTNAME='${MAIL_HOSTNAME}' bash -s" <<'REMOTE'
 set -eu
 docker inspect -f '{{.State.Status}}' billionmail-core-billionmail-1 | grep -q running
 curl -fsS http://127.0.0.1/ | grep -q BillionMail
 docker exec billionmail-postfix-billionmail-1 postconf myhostname | grep -F -q "${MAIL_HOSTNAME}"
 echo "Smoke OK: core running, HTTP title BillionMail, myhostname ${MAIL_HOSTNAME}"
 REMOTE
-              '''
+              ''')
             } else {
-              powershell '''
-                $ErrorActionPreference = 'Stop'
-                $sshOpts = @('-o', 'StrictHostKeyChecking=accept-new')
-                if ($env:SSH_KEY) { $sshOpts += @('-i', $env:SSH_KEY, '-o', 'IdentitiesOnly=yes') }
+              powershell(sshVarsWindows() + '''
                 $remote = @"
 set -eu
 docker inspect -f '{{.State.Status}}' billionmail-core-billionmail-1 | grep -q running
@@ -294,17 +265,9 @@ curl -fsS http://127.0.0.1/ | grep -q BillionMail
 docker exec billionmail-postfix-billionmail-1 postconf myhostname | grep -F -q "$($env:MAIL_HOSTNAME)"
 echo "Smoke OK on VPS"
 "@
-                $remote | & ssh @sshOpts $env:DEPLOY_HOST 'bash -s'
-                if ($LASTEXITCODE -ne 0) { throw 'remote smoke check failed' }
-              '''
+                Invoke-RemoteBash $remote
+              ''')
             }
-          }
-          if (cred) {
-            withCredentials([sshUserPrivateKey(credentialsId: cred, keyFileVariable: 'SSH_KEY')]) {
-              smoke()
-            }
-          } else {
-            smoke()
           }
         }
       }
@@ -316,7 +279,74 @@ echo "Smoke OK on VPS"
       echo "BillionMail deployed to ${params.DEPLOY_HOST}:${params.DEPLOY_PATH}. Point DNS A/SPF/PTR at ${env.SERVER_IP}. Panel: http://${env.SERVER_IP}/billion"
     }
     failure {
-      echo "Deploy to ${params.DEPLOY_HOST} failed. The Jenkins agent needs SSH as root to 195.211.46.238, and that VPS needs Docker and write access to DEPLOY_PATH."
+      script {
+        def authHint = params.SSH_AUTH_MODE == 'password'
+          ? "Secret text credential '${params.SSH_PASSWORD_CREDENTIAL_ID}' with the ${params.DEPLOY_HOST} password"
+          : "SSH credential '${params.SSH_CREDENTIAL_ID}' authorized on ${params.DEPLOY_HOST}"
+        echo "Deploy failed. Needs: ${authHint}, Docker on the target VPS, and write access to ${params.DEPLOY_PATH}."
+      }
     }
   }
+}
+
+// ---- SSH auth helpers (password today, private key later — see SSH_AUTH_MODE) ----
+
+def sshAuthCreds() {
+  if (params.SSH_AUTH_MODE == 'password') {
+    return [string(credentialsId: params.SSH_PASSWORD_CREDENTIAL_ID, variable: 'SSHPASS')]
+  }
+  return [sshUserPrivateKey(credentialsId: params.SSH_CREDENTIAL_ID, keyFileVariable: 'SSH_KEY')]
+}
+
+def sshVarsUnix() {
+  return '''
+                if [ "$SSH_AUTH_MODE" = "password" ]; then
+                  SSH="sshpass -e ssh $SSH_OPTS"
+                  SCP="sshpass -e scp $SSH_OPTS"
+                  RSH="sshpass -e ssh $SSH_OPTS"
+                else
+                  SSH="ssh -i $SSH_KEY $SSH_OPTS"
+                  SCP="scp -i $SSH_KEY $SSH_OPTS"
+                  RSH="ssh -i $SSH_KEY $SSH_OPTS"
+                fi
+'''
+}
+
+def sshVarsWindows() {
+  return '''
+                $ErrorActionPreference = 'Stop'
+                $sshOpts = $env:SSH_OPTS -split ' '
+                $deployHost = $env:DEPLOY_HOST
+                $deployPath = $env:DEPLOY_PATH
+                $usePassword = $env:SSH_AUTH_MODE -eq 'password'
+
+                function Invoke-RemoteSsh([string[]]$remoteArgs) {
+                  if ($usePassword) {
+                    & plink -pw $env:SSHPASS -batch @sshOpts $deployHost @remoteArgs
+                  } else {
+                    & ssh -i $env:SSH_KEY @sshOpts $deployHost @remoteArgs
+                  }
+                  if ($LASTEXITCODE -ne 0) { throw "remote command failed: $remoteArgs" }
+                }
+
+                function Invoke-RemoteScp([string]$src, [string]$dst, [switch]$Recurse) {
+                  $recurseFlag = @()
+                  if ($Recurse.IsPresent) { $recurseFlag = @('-r') }
+                  if ($usePassword) {
+                    & pscp -pw $env:SSHPASS @sshOpts @recurseFlag $src $dst
+                  } else {
+                    & scp -i $env:SSH_KEY @sshOpts @recurseFlag $src $dst
+                  }
+                  if ($LASTEXITCODE -ne 0) { throw "remote copy failed: $src -> $dst" }
+                }
+
+                function Invoke-RemoteBash([string]$script) {
+                  if ($usePassword) {
+                    $script | & plink -pw $env:SSHPASS -batch @sshOpts $deployHost 'bash -s'
+                  } else {
+                    $script | & ssh -i $env:SSH_KEY @sshOpts $deployHost 'bash -s'
+                  }
+                  if ($LASTEXITCODE -ne 0) { throw 'remote bash script failed' }
+                }
+'''
 }
